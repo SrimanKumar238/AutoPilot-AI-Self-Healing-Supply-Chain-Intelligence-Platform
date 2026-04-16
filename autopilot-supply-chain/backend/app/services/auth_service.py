@@ -1,6 +1,7 @@
 """
 Auth service – registration, login, MFA, token management, Google OAuth.
 Uses Redis for OTP storage with TTL.
+In DEMO mode (APP_ENV=development), OTP is also stored in memory for easy access.
 """
 import random
 import string
@@ -16,6 +17,9 @@ from app.models.user import User, UserRole
 from app.services.mfa_service import MFAService
 
 logger = structlog.get_logger(__name__)
+
+# In-memory OTP store for demo mode (when Redis unavailable)
+_demo_otp_store: dict = {}
 
 
 class AuthService:
@@ -55,26 +59,51 @@ class AuthService:
         return user
 
     def send_otp(self, user: User) -> str:
-        """Generate and email an OTP; stores in Redis with TTL."""
+        """Generate and email an OTP; stores in Redis with TTL (and memory for demo)."""
         otp = "".join(random.choices(string.digits, k=6))
         key = f"otp:{user.id}"
+
+        # Store in Redis (primary)
         if self.redis:
-            self.redis.setex(key, settings.OTP_EXPIRE_MINUTES * 60, otp)
+            try:
+                self.redis.setex(key, settings.OTP_EXPIRE_MINUTES * 60, otp)
+            except Exception as e:
+                logger.warning("Redis OTP store failed, using memory", error=str(e))
+
+        # Always keep in-memory as fallback (demo mode)
+        _demo_otp_store[str(user.id)] = otp
+
         logger.info("OTP generated", user_id=str(user.id))
-        # Send email (fire-and-forget)
+        # Send email (fire-and-forget — falls back to demo mode if no SMTP)
         self.mfa_service.send_otp_email(user.email, otp, user.username)
         return otp
 
     def verify_otp(self, user_id: UUID, otp: str) -> bool:
         key = f"otp:{user_id}"
-        if not self.redis:
-            return True  # Dev bypass if no Redis
-        stored = self.redis.get(key)
-        if not stored:
-            raise ValueError("OTP expired or not found")
-        if stored.decode() != otp:
+        uid = str(user_id)
+
+        # Try Redis first
+        if self.redis:
+            try:
+                stored = self.redis.get(key)
+                if stored is not None:
+                    if stored.decode() != otp:
+                        raise ValueError("Invalid OTP")
+                    self.redis.delete(key)
+                    _demo_otp_store.pop(uid, None)
+                    return True
+            except ValueError:
+                raise
+            except Exception as e:
+                logger.warning("Redis OTP verify failed, checking memory", error=str(e))
+
+        # Fallback to in-memory store (demo mode)
+        stored_demo = _demo_otp_store.get(uid)
+        if stored_demo is None:
+            raise ValueError("OTP expired or not found. Please request a new code.")
+        if stored_demo != otp:
             raise ValueError("Invalid OTP")
-        self.redis.delete(key)
+        _demo_otp_store.pop(uid, None)
         return True
 
     def create_tokens(self, user: User) -> Tuple[str, str]:
@@ -83,11 +112,14 @@ class AuthService:
         refresh = create_refresh_token(payload)
         # Store refresh token in Redis for revocation support
         if self.redis:
-            self.redis.setex(
-                f"refresh:{user.id}:{refresh[-16:]}",
-                settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-                "valid",
-            )
+            try:
+                self.redis.setex(
+                    f"refresh:{user.id}:{refresh[-16:]}",
+                    settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+                    "valid",
+                )
+            except Exception:
+                pass
         return access, refresh
 
     def refresh_tokens(self, refresh_token: str) -> Tuple[str, str]:

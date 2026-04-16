@@ -1,25 +1,39 @@
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
+  external_labels:
+    monitor: 'autopilot-ai'
 
 scrape_configs:
+  # ── Backend FastAPI ──────────────────────────────────────────────────────────
   - job_name: 'autopilot-backend'
     static_configs:
       - targets: ['backend:8000']
     metrics_path: '/metrics'
+    scrape_interval: 10s
 
+  # ── RabbitMQ Management Plugin ───────────────────────────────────────────────
+  # Note: RabbitMQ management metrics at /api/metrics requires prometheus plugin
+  # For now scraping the Prometheus endpoint if enabled
   - job_name: 'rabbitmq'
     static_configs:
-      - targets: ['rabbitmq:15692']
+      - targets: ['rabbitmq:15672']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
 
-  - job_name: 'postgres'
-    static_configs:
-      - targets: ['postgres:5432']
-
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis:9121']
-
+  # ── Prometheus self-scrape ───────────────────────────────────────────────────
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
+
+  # ── Loki ─────────────────────────────────────────────────────────────────────
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['loki:3100']
+    metrics_path: '/metrics'
+
+  # ── Tempo ─────────────────────────────────────────────────────────────────────
+  - job_name: 'tempo'
+    static_configs:
+      - targets: ['tempo:3200']
+    metrics_path: '/metrics'

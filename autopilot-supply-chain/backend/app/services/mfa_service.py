@@ -1,4 +1,6 @@
-"""MFA service – send OTP via email using FastAPI-Mail / SMTP."""
+"""MFA service – send OTP via email using SMTP.
+In DEMO MODE (no SMTP configured), OTP is logged and returned in the API response.
+"""
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -7,13 +9,35 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# Store last OTP in-memory for demo mode retrieval
+_last_demo_otp: dict = {}
+
 
 class MFAService:
     def __init__(self, redis_client=None):
         self.redis = redis_client
 
-    def send_otp_email(self, email: str, otp: str, username: str):
-        """Send OTP via SMTP. Non-blocking best-effort."""
+    def send_otp_email(self, email: str, otp: str, username: str) -> bool:
+        """Send OTP via SMTP. Falls back to demo mode if SMTP not configured."""
+        global _last_demo_otp
+
+        # ── Demo Mode: No SMTP configured ─────────────────────────────────────
+        if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+            _last_demo_otp[username] = otp
+            logger.warning(
+                "⚠️  DEMO MODE: OTP not sent via email (no SMTP configured)",
+                username=username,
+                demo_otp=otp,
+                hint="Use this OTP in the MFA screen",
+            )
+            # Log prominently so it's easy to find in logs
+            print(f"\n{'='*60}")
+            print(f"  🔐 DEMO OTP for [{username}]: {otp}")
+            print(f"  Use this on the MFA verification screen")
+            print(f"{'='*60}\n")
+            return True
+
+        # ── Production Mode: Send real email ──────────────────────────────────
         html = f"""
         <div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0f172a;
                     border-radius:12px;padding:32px;color:#e2e8f0">
@@ -44,6 +68,13 @@ class MFAService:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.sendmail(settings.SMTP_USER, email, msg.as_string())
             logger.info("OTP email sent", email_masked=email[:3] + "***")
+            return True
         except Exception as e:
-            logger.error("OTP email failed", error=str(e))
-            # Don't raise – OTP is still stored in Redis for testing
+            logger.error("OTP email failed – falling back to demo mode", error=str(e))
+            # Fallback: still store demo OTP so login works
+            _last_demo_otp[username] = otp
+            logger.warning("Demo OTP (email failed)", username=username, demo_otp=otp)
+            print(f"\n{'='*60}")
+            print(f"  🔐 DEMO OTP for [{username}] (email failed): {otp}")
+            print(f"{'='*60}\n")
+            return False

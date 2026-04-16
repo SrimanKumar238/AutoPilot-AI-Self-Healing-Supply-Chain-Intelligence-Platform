@@ -35,7 +35,7 @@ Frontend (React) ──── REST API ────► FastAPI Backend (MVC)
                           ▼                ▼                ▼
                       PostgreSQL         Redis          RabbitMQ
                     (Encrypted PII)   (Idempotency)  (Event Broker)
-                                                          │
+                                                           │
                                    ┌──────────────────────┤
                                    ▼                      ▼
                            Worker 1 (Anomaly)    Worker 2 (Healing)
@@ -70,8 +70,9 @@ Frontend (React) ──── REST API ────► FastAPI Backend (MVC)
 ```
 autopilot-supply-chain/
 ├── docker-compose.yml           ← All 12 services, single network
+├── Dockerfile                   ← Multi-stage: backend / worker1 / worker2 / frontend
+├── .env                         ← Ready-to-run defaults (no real secrets needed)
 ├── .env.example                 ← Environment variables template
-├── README.md
 │
 ├── backend/                     ← FastAPI (MVC pattern)
 │   ├── app/
@@ -79,13 +80,14 @@ autopilot-supply-chain/
 │   │   ├── core/                ← Config, Singleton DB, Security, Logging, Tracing
 │   │   ├── models/              ← SQLAlchemy models (M in MVC)
 │   │   ├── schemas/             ← Pydantic schemas (PII-safe)
-│   │   ├── services/            ← Business logic + event publisher
+│   │   ├── services/            ← Business logic + event publisher + MFA
 │   │   ├── controllers/         ← Route handlers (C in MVC)
 │   │   └── middlewares/         ← JWT/RBAC + request logging
-│   └── Dockerfile
+│   └── scripts/
+│       └── seed_demo_data.py    ← Populate DB with demo data
 │
 ├── workers/
-│   ├── shared/                  ← Queue client (atomic) + idempotency
+│   ├── shared/                  ← Queue client (atomic) + idempotency guard
 │   ├── worker1_anomaly/         ← AI Anomaly Detection Agent
 │   └── worker2_healing/         ← Self-Healing Orchestrator Agent
 │
@@ -93,15 +95,15 @@ autopilot-supply-chain/
 │   └── src/
 │       ├── pages/               ← Dashboard, Shipments, Inventory, Suppliers, Alerts, Admin
 │       ├── components/          ← Layout, Sidebar
-│       ├── services/            ← Axios API client (auto token refresh)
+│       ├── services/            ← Axios API client (auto token refresh) + demo mode
 │       └── store/               ← Zustand auth store
 │
 └── observability/
-    ├── prometheus/
-    ├── grafana/
-    ├── loki/
-    ├── promtail/
-    └── tempo/
+    ├── prometheus/              ← Metrics scraping config
+    ├── grafana/                 ← Pre-provisioned dashboards + datasources
+    ├── loki/                    ← Log aggregation config
+    ├── promtail/                ← Log shipper config
+    └── tempo/                   ← Distributed tracing config
 ```
 
 ---
@@ -109,7 +111,7 @@ autopilot-supply-chain/
 ## 🚀 How to Run
 
 ### Prerequisites
-- Docker Desktop (with WSL2 on Windows)
+- Docker Desktop (with WSL2 on Windows) — [Download here](https://www.docker.com/products/docker-desktop/)
 - Docker Compose v2
 
 ### Steps
@@ -118,116 +120,139 @@ autopilot-supply-chain/
 # 1. Clone and navigate to project
 cd autopilot-supply-chain
 
-# 2. Copy environment file and configure
-cp .env.example .env
-# Edit .env: set SMTP credentials, GOOGLE OAuth, FERNET_KEY
+# 2. Environment file is already configured (no secrets needed for demo)
+# .env is ready-to-run with safe defaults
 
 # 3. Start all services
-docker-compose up --build -d
+docker compose up --build -d
 
 # 4. Verify all services are healthy
-docker-compose ps
+docker compose ps
 
-# 5. Access the platform
+# 5. Seed demo data (after all services are healthy)
+docker compose exec backend python scripts/seed_demo_data.py
 ```
 
-### Service URLs
-
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| **Frontend Dashboard** | http://localhost:3000 | Register account |
-| **Backend API Docs** | http://localhost:8000/api/docs | — |
-| **Grafana** | http://localhost:3001 | admin / admin |
-| **RabbitMQ Management** | http://localhost:15672 | admin / admin_pass |
-| **Prometheus** | http://localhost:9090 | — |
-
-### Development (Frontend only)
+### Quick Frontend Demo (no Docker required)
 
 ```bash
 cd frontend
 npm install
 npm run dev
 # Open http://localhost:3000
+# Login: admin / Admin@123 / OTP: 123456 (auto-filled in demo mode)
 ```
+
+### Service URLs
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| **Frontend Dashboard** | http://localhost:3000 | admin / Admin@123 |
+| **Backend API Docs** | http://localhost:8000/api/docs | — |
+| **Grafana** | http://localhost:3001 | admin / admin |
+| **RabbitMQ Management** | http://localhost:15672 | admin / admin_pass |
+| **Prometheus** | http://localhost:9090 | — |
+
+### Demo Login Flow
+
+1. Go to http://localhost:3000
+2. Username: `admin`, Password: `Admin@123`
+3. On MFA screen: click **"Auto-fill ⚡"** (OTP: 123456 in demo mode)
+4. Dashboard loads with live KPIs and AI agent status
 
 ---
 
 ## ✅ Requirements Coverage
 
 ### Maintainability ✅
-- [x] Clean MVC project structure
-- [x] README.md (Problem, Solution, Tech Stack, How to Run)
+- [x] Clean MVC project structure (models → services → controllers)
+- [x] README.md (Problem, Solution, Tech Stack, How to Run, Screenshots)
 - [x] Model-View-Controller pattern (FastAPI: Models → Services → Controllers)
-- [x] Singleton pattern for DB connection (`DatabaseManager` metaclass)
+- [x] Singleton pattern for DB connection (`DatabaseManager` with metaclass)
 - [x] REST API with versioned routes (`/api/v1/...`)
 - [x] Structured error logging with structlog (JSON → Loki)
 
 ### Scalability ✅
-- [x] Event-Driven Architecture (RabbitMQ topic exchange)
+- [x] Event-Driven Architecture (RabbitMQ TOPIC exchange, durable, dead-letter)
 - [x] Workers are separate Docker services (NOT async jobs in backend)
-- [x] RabbitMQ queue with durable messages + dead-letter exchange
+- [x] RabbitMQ queue with durable messages + dead-letter exchange (DLX)
 - [x] All services dockerized in single `docker-compose.yml`
 - [x] Single `supply-chain-net` Docker network (DNS-based discovery)
-- [x] 2 workers running in parallel (Worker 1 + Worker 2)
+- [x] 2 workers in parallel: Worker 1 (anomaly) + Worker 2 (healing)
 - [x] Atomic task pickup (`prefetch_count=1` + `basic_ack`)
-- [x] Idempotency via Redis deduplication keys
+- [x] Idempotency via Redis deduplication keys (`IdempotencyGuard`)
 
 ### Platform Security ✅
-- [x] Email/password login
-- [x] MFA: 6-digit OTP via email (5-min TTL in Redis)
-- [x] JWT access tokens (15min) + refresh tokens (7d)
-- [x] Google OAuth2 login
-- [x] RBAC: Admin | Operator | Viewer roles
-- [x] PII (email, phone) NOT exposed in any API response
-- [x] PII encrypted in DB using Fernet symmetric encryption
+- [x] Email/password login with bcrypt hashing
+- [x] MFA: 6-digit OTP via email (5-min TTL in Redis, demo mode fallback)
+- [x] JWT access tokens (60min) + refresh tokens (7d, stored in Redis)
+- [x] Google OAuth2 login (additional points)
+- [x] RBAC: Admin | Operator | Viewer roles enforced on every route
+- [x] PII (email, phone) **NOT exposed** in any API response (Pydantic schemas)
+- [x] PII encrypted in DB using **Fernet** (AES-128) symmetric encryption
 
 ### Observability ✅
-- [x] Prometheus metrics (all services scraped)
-- [x] Grafana dashboards (pre-provisioned datasources)
+- [x] Prometheus metrics (FastAPI instrumentator, `/metrics` endpoint)
+- [x] Grafana dashboards (pre-provisioned: Prometheus + Loki + Tempo datasources)
+- [x] Pre-built Supply Chain Control Tower dashboard (auto-loaded)
 - [x] Loki log aggregation (JSON structured logs via Promtail)
 - [x] Tempo distributed tracing (OpenTelemetry → OTLP → Tempo)
-- [x] Request tracing across backend + workers
+- [x] Request tracing across backend + workers (OTLP configured on all services)
 
 ---
 
 ## 🤖 AI Agent Details
 
 ### Worker 1: Anomaly Detection Agent
-- Subscribes to: `shipment.*`, `inventory.low`, `supplier.*`
-- Runs rule-based + statistical anomaly detection
-- Detects: shipment delays, inventory shortfalls, supplier risk, customs holds
-- Publishes `anomaly.detected` events with AI confidence scores
+- **Subscribes to:** `shipment.*`, `inventory.low`, `supplier.*`
+- **Detection logic:** Rule-based + statistical analysis
+- **Detects:** Shipment delays (>4h), inventory shortfalls, supplier risk, customs holds
+- **Publishes:** `anomaly.detected` events with AI confidence scores (0–1)
+- **Idempotency:** Redis-backed dedup with 24h TTL
 
 ### Worker 2: Self-Healing Orchestrator
-- Subscribes to: `anomaly.detected`
-- Healing strategies:
-  - **Shipment delay** → Rerouting + stakeholder notification + backup supplier
+- **Subscribes to:** `anomaly.detected`
+- **Healing strategies:**
+  - **Shipment delay** → Priority rerouting + stakeholder notification + backup supplier
   - **Inventory low** → Auto purchase order + cross-warehouse reallocation
   - **Supplier risk** → Secondary supplier evaluation + risk review scheduling
   - **Route disruption** → Alternative route calculation + carrier notification
-- Writes healing results to database with full audit trail
-- Publishes `healing.completed` events
+- **Persistence:** Writes healing result to PostgreSQL `alerts` table
+- **Publishes:** `healing.completed` events with full audit trail
 
 ---
 
 ## 🔐 Security Design
 
-- **PII fields** (email, phone) stored with Fernet (AES-128) encryption
-- **Pydantic schemas** intentionally omit PII fields from all API responses
-- **Masked email** shown in admin view (e.g., `jo***@company.com`)
+- **PII fields** (email, phone) stored with Fernet (AES-128) encryption in DB
+- **Pydantic schemas** intentionally omit PII fields from ALL API responses
+- **Masked email** shown in admin view only (e.g., `jo***@company.com`)
 - **RBAC** enforced via FastAPI dependencies on every protected route
 - **JWT** with short-lived access tokens and revocable refresh tokens in Redis
-- **OTP** expires in 5 minutes; stored only in Redis, never logged
+- **OTP** expires in 5 minutes; stored only in Redis, never logged as plaintext
 
 ---
 
 ## 📊 Screenshots
 
-> Screenshots added after running the application.
+### Login Page
+![Login Page](./docs/screenshots/login.png)
+
+> Full glassmorphism dark-mode UI with demo login hint and Google OAuth
+
+### Supply Chain Control Tower Dashboard
+![Dashboard](./docs/screenshots/dashboard.png)
+
+> 8 real-time KPI cards, event activity chart (24h), shipment status donut chart, live anomaly feed, self-healing log, and worker status panels
+
+### Shipments Management
+![Shipments](./docs/screenshots/shipments.png)
+
+> Track all shipments with status badges, delay indicators, and event publishing to trigger anomaly detection
 
 ---
 
 ## 👤 Author
 
-Built for **DeepFrog AI Solutions Pvt. Ltd.** – Track 4: Real-Time Supply Chain Control Tower Agent  
+Built for **DeepFrog AI Solutions Pvt. Ltd.** – Track 4: Real-Time Supply Chain Control Tower Agent
 AutoPilot AI Team | April 2026
