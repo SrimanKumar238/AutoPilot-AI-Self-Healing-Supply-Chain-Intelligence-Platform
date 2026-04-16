@@ -21,16 +21,17 @@ export default function ShipmentsPage() {
   const [form, setForm] = useState({ origin: '', destination: '', carrier: '', priority: 'medium' })
   const [creating, setCreating] = useState(false)
 
-  const load = async () => {
-    setLoading(true)
+  const load = async (showSpinner = false) => {
+    if (showSpinner) setLoading(true)
     try {
       const { data } = await shipmentAPI.list({ status: statusFilter || undefined })
       if (data.items?.length) setShipments(data.items)
-    } catch { /* use mock */ }
-    finally { setLoading(false) }
+    } catch { /* use mock data already set */ }
+    finally { if (showSpinner) setLoading(false) }
   }
 
-  useEffect(() => { load() }, [statusFilter])
+  // Load silently on mount (mock data already showing — no spinner)
+  useEffect(() => { load(false) }, [statusFilter])
 
   const filtered = shipments.filter(s =>
     !search || s.tracking_number.toLowerCase().includes(search.toLowerCase()) ||
@@ -62,7 +63,7 @@ export default function ShipmentsPage() {
           <p>Track and manage all shipments in real-time</p>
         </div>
         <div className="topbar-right">
-          <button className="btn btn-ghost btn-sm" onClick={load}><RefreshCw size={14} /></button>
+          <button className="btn btn-ghost btn-sm" onClick={() => load(true)}><RefreshCw size={14} /></button>
           <button id="create-shipment-btn" className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}>
             <Plus size={14} /> New Shipment
           </button>
