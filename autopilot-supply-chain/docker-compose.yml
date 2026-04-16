@@ -1,0 +1,296 @@
+version: "3.9"
+
+# =============================================================================
+# AutoPilot AI – Self-Healing Supply Chain Platform
+# Single docker-compose.yml — all 12 services on one bridge network.
+# All application code is built from the single root Dockerfile.
+# =============================================================================
+
+networks:
+  supply-chain-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  grafana_data:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+
+services:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. PostgreSQL – Primary database (PII encrypted via Fernet in app layer)
+  # ────────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sc_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-autopilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-autopilot_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-supply_chain}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - supply-chain-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-autopilot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Redis – OTP TTL store + idempotency dedup keys
+  # ────────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sc_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - supply-chain-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 3. RabbitMQ – Event broker (topic exchange, durable, dead-letter queue)
+  # ────────────────────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: sc_rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-admin_pass}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"    # Management UI → http://localhost:15672
+    networks:
+      - supply-chain-net
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. Backend – FastAPI (MVC + Singleton DB + JWT MFA + RBAC + PII encryption)
+  #    Built from root Dockerfile — target: backend
+  # ────────────────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    container_name: sc_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-autopilot}:${POSTGRES_PASSWORD:-autopilot_pass}@postgres:5432/${POSTGRES_DB:-supply_chain}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-admin_pass}@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_SERVICE_NAME: autopilot-backend
+    ports:
+      - "8000:8000"
+    networks:
+      - supply-chain-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. Worker 1 – Anomaly Detection AI Agent
+  #    Built from root Dockerfile — target: worker1
+  # ────────────────────────────────────────────────────────────────────────────
+  worker1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker1
+    container_name: sc_worker1_anomaly
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WORKER_ID: anomaly-worker-1
+      DATABASE_URL: postgresql://${POSTGRES_USER:-autopilot}:${POSTGRES_PASSWORD:-autopilot_pass}@postgres:5432/${POSTGRES_DB:-supply_chain}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-admin_pass}@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_SERVICE_NAME: anomaly-detection-worker
+    networks:
+      - supply-chain-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 6. Worker 2 – Self-Healing Orchestrator Agent
+  #    Built from root Dockerfile — target: worker2
+  # ────────────────────────────────────────────────────────────────────────────
+  worker2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker2
+    container_name: sc_worker2_healing
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WORKER_ID: healing-worker-1
+      DATABASE_URL: postgresql://${POSTGRES_USER:-autopilot}:${POSTGRES_PASSWORD:-autopilot_pass}@postgres:5432/${POSTGRES_DB:-supply_chain}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-admin_pass}@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_SERVICE_NAME: self-healing-worker
+    networks:
+      - supply-chain-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 7. Frontend – React + Vite + Nginx
+  #    Built from root Dockerfile — target: frontend
+  # ────────────────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+    container_name: sc_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - supply-chain-net
+    depends_on:
+      - backend
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 8. Prometheus – Metrics scraper
+  # ────────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: sc_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--web.enable-remote-write-receiver"
+    ports:
+      - "9090:9090"
+    networks:
+      - supply-chain-net
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 9. Grafana – Dashboards (auto-provisioned datasources: Prometheus+Loki+Tempo)
+  # ────────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: sc_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"     # Grafana UI → http://localhost:3001
+    networks:
+      - supply-chain-net
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 10. Loki – Log aggregation
+  # ────────────────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: sc_loki
+    restart: unless-stopped
+    volumes:
+      - loki_data:/loki
+      - ./observability/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - supply-chain-net
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 11. Promtail – Log shipper (Docker → Loki)
+  # ────────────────────────────────────────────────────────────────────────────
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: sc_promtail
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./observability/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - supply-chain-net
+    depends_on:
+      - loki
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 12. Tempo – Distributed tracing (OpenTelemetry → OTLP)
+  # ────────────────────────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.4.0
+    container_name: sc_tempo
+    restart: unless-stopped
+    volumes:
+      - tempo_data:/tmp/tempo
+      - ./observability/tempo/tempo-config.yml:/etc/tempo/config.yml:ro
+    command: -config.file=/etc/tempo/config.yml
+    ports:
+      - "3200:3200"    # Tempo HTTP
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    networks:
+      - supply-chain-net
