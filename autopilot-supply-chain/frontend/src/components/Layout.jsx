@@ -6,6 +6,7 @@ import {
   LayoutDashboard, Ship, Package, Users, AlertTriangle,
   Settings, LogOut, Zap, Activity, Bell
 } from 'lucide-react'
+import ChatBot from './ChatBot'
 
 const navItems = [
   { path: '/dashboard', icon: <LayoutDashboard size={16} />, label: 'Control Tower' },
@@ -105,6 +106,9 @@ export default function Layout() {
       <main className="main-content">
         <Outlet />
       </main>
+
+      {/* AI Chatbot — available on all pages */}
+      <ChatBot />
     </div>
   )
 }
