@@ -231,3 +231,9 @@ npm run dev
 
 Built for **DeepFrog AI Solutions Pvt. Ltd.** – Track 4: Real-Time Supply Chain Control Tower Agent  
 AutoPilot AI Team | April 2026
+
+
+
+<img width="1600" height="762" alt="WhatsApp Image 2026-04-16 at 6 00 22 PM" src="https://github.com/user-attachments/assets/89388b78-13b8-464f-9ca8-b43ca8722ae9" />
+<img width="1600" height="763" alt="WhatsApp Image 2026-04-16 at 5 58 20 PM" src="https://github.com/user-attachments/assets/76417e08-d2cf-4562-8245-41552deccc79" />
+
